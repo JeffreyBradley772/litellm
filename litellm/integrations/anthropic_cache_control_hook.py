@@ -370,14 +370,15 @@ def _block_coverage_skip(block: object, role: object, automatic: bool = False) -
     return False
 
 
-def _transcript_coverage_skip(messages: Sequence[object], automatic_control: object = None) -> bool:
-    leading_end: Final = next(
+def _leading_system_end(messages: Sequence[object]) -> int:
+    return next(
         (index for index, message in enumerate(messages) if _attribute_or_key(message, "role") != "system"),
         len(messages),
     )
-    return any(_attribute_or_key(message, "role") == "system" for message in messages[leading_end:]) or any(
-        _message_coverage_skip(message, automatic_control is not None) for message in messages
-    )
+
+
+def _transcript_coverage_skip(messages: Sequence[object], automatic_control: object = None) -> bool:
+    return any(_message_coverage_skip(message, automatic_control is not None) for message in messages)
 
 
 def _ttl_duration(control: object) -> int:
@@ -786,12 +787,38 @@ class AnthropicCacheControlHook(CustomPromptManagement):
                     prefix_controls,
                     automatic_control,
                 ),
-                AnthropicCacheControlHook._resolve_target_indices(point, list(current)),
+                AnthropicCacheControlHook._resolve_scoped_target_indices(point, list(current)),
                 current,
             ),
             points,
             messages,
         )
+
+    @staticmethod
+    def _resolve_scoped_target_indices(
+        point: CacheControlMessageInjectionPoint, messages: list[AllMessageValues]
+    ) -> list[int]:
+        """``_resolve_target_indices`` for the Anthropic Responses bridge, where a system message after
+        the first turn stays in the conversation (``place_mid_conversation_system``) and is never a
+        breakpoint: a role point marks only the leading system run, and an ordinal that lands on a later
+        system message moves back to the nearest turn before it.
+        """
+        leading_end: Final = _leading_system_end(messages)
+
+        def conversation_turn(index: int) -> int | None:
+            return next(
+                (
+                    candidate
+                    for candidate in range(index, -1, -1)
+                    if candidate < leading_end or _attribute_or_key(messages[candidate], "role") != "system"
+                ),
+                None,
+            )
+
+        resolved: Final = AnthropicCacheControlHook._resolve_target_indices(point, messages)
+        if point.get("index") is None:
+            return [index for index in resolved if conversation_turn(index) == index]
+        return [turn for index in resolved if (turn := conversation_turn(index)) is not None]
 
     @staticmethod
     def _apply_scoped_target(
