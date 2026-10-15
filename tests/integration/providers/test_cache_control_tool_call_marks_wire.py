@@ -328,13 +328,10 @@ def test_actual_sync_responses_automatic_tail_ttl_must_match_explicit_addition(e
         assert body["cache_control"] == EPHEMERAL, request.body
 
 
-def test_actual_sync_responses_nonleading_system_reminder_stands_down_all_configured_points() -> None:
-    history: Final[list[JsonValue]] = [
-        {"role": "user", "content": ASK, "cache_control": {"type": "ephemeral", "ttl": "5m"}},
-        {"role": "assistant", "content": "working"},
-        {"role": "system", "content": "Reminder: use the results."},
-        {"role": "user", "content": "tail"},
-    ]
+_REMINDER: Final[JsonValue] = {"role": "system", "content": "Reminder: use the results."}
+
+
+def _reminder_marks(history: list[JsonValue]) -> list[tuple[str, str | None]]:
     with wire_server(anthropic_peer) as wire:
         response: Final = litellm.responses(
             model=f"anthropic/{ANTHROPIC_MODEL}",
@@ -348,8 +345,37 @@ def test_actual_sync_responses_nonleading_system_reminder_stands_down_all_config
         )
         assert response.status == "completed", response
         request: Final = _only_responses_request(wire)
-        assert [(mark.label, mark.ttl) for mark in anthropic_marks(request)] == [(ASK_LABEL, "5m")], request.body
         assert b"Reminder: use the results." in request.body, request.body
+        return [(mark.label, mark.ttl) for mark in anthropic_marks(request)]
+
+
+def test_actual_sync_responses_nonleading_system_reminder_keeps_client_mark_ttl_order() -> None:
+    history: Final[list[JsonValue]] = [
+        {"role": "user", "content": ASK, "cache_control": {"type": "ephemeral", "ttl": "5m"}},
+        {"role": "assistant", "content": "working"},
+        _REMINDER,
+        {"role": "user", "content": "tail"},
+    ]
+    assert _reminder_marks(history) == [(SYSTEM_LABEL, "1h"), (ASK_LABEL, "5m")]
+
+
+def test_actual_sync_responses_nonleading_system_reminder_is_never_a_breakpoint() -> None:
+    history: Final[list[JsonValue]] = [
+        {"role": "user", "content": ASK},
+        {"role": "assistant", "content": "working"},
+        _REMINDER,
+        {"role": "user", "content": "tail"},
+    ]
+    assert _reminder_marks(history) == [(SYSTEM_LABEL, "1h"), ("user:text:tail", "1h")]
+
+
+def test_actual_sync_responses_trailing_system_reminder_moves_breakpoint_to_turn_before() -> None:
+    history: Final[list[JsonValue]] = [
+        {"role": "user", "content": ASK},
+        {"role": "assistant", "content": "working"},
+        _REMINDER,
+    ]
+    assert _reminder_marks(history) == [(SYSTEM_LABEL, "1h"), ("assistant:text:working", "1h")]
 
 
 def test_actual_sync_responses_dropped_output_part_mark_does_not_block_outer_result_injection() -> None:
